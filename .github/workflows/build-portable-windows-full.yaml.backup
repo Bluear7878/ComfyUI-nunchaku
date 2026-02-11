@@ -1,0 +1,137 @@
+name: Build Portable Windows Release
+on:
+  workflow_dispatch:
+    inputs:
+      nunchaku_version:
+        description: 'Nunchaku version (e.g., 1.2.0)'
+        required: true
+        default: '1.2.0'
+      cuda_version:
+        description: 'CUDA version'
+        required: true
+        type: choice
+        options:
+          - cu128
+          - cu126
+        default: 'cu128'
+      release_tag:
+        description: 'Release tag (e.g., v1.2.0-portable)'
+        required: true
+  push:
+    branches:
+      - feature/protable_windows
+    paths:
+      - '.github/workflows/build-portable-windows.yaml'
+      - 'portable_windows/**'
+
+permissions:
+  contents: write
+
+jobs:
+  build-portable:
+    name: Build Windows Portable Package
+    runs-on: windows-latest
+    steps:
+      - name: Checkout ComfyUI-nunchaku
+        uses: actions/checkout@v4
+        with:
+          path: ComfyUI-nunchaku
+
+      - name: Set build variables
+        id: vars
+        shell: pwsh
+        run: |
+          $nunchaku_version = "${{ github.event.inputs.nunchaku_version }}"
+          $cuda_version = "${{ github.event.inputs.cuda_version }}"
+          $release_tag = "${{ github.event.inputs.release_tag }}"
+
+          # Use defaults for push events
+          if ([string]::IsNullOrEmpty($nunchaku_version)) { $nunchaku_version = "1.2.0" }
+          if ([string]::IsNullOrEmpty($cuda_version)) { $cuda_version = "cu128" }
+          if ([string]::IsNullOrEmpty($release_tag)) { $release_tag = "v1.2.0-portable-test" }
+
+          echo "nunchaku_version=$nunchaku_version" >> $env:GITHUB_OUTPUT
+          echo "cuda_version=$cuda_version" >> $env:GITHUB_OUTPUT
+          echo "release_tag=$release_tag" >> $env:GITHUB_OUTPUT
+
+      - name: Build portable package
+        shell: cmd
+        working-directory: ComfyUI-nunchaku/portable_windows
+        env:
+          CI_BUILD: '1'
+          CUDA_INDEX: ${{ steps.vars.outputs.cuda_version }}
+          NUNCHAKU_VERSION: ${{ steps.vars.outputs.nunchaku_version }}
+        run: |
+          call build_portable.cmd
+
+      - name: Create portable archive with 7z (split volumes)
+        shell: pwsh
+        run: |
+          $version = "${{ steps.vars.outputs.nunchaku_version }}"
+          $cuda = "${{ steps.vars.outputs.cuda_version }}"
+          $archiveName = "ComfyUI_nunchaku_portable_v${version}_${cuda}.7z"
+
+          Write-Host "Creating split 7z archive (1.9GB volumes) with maximum compression..."
+          & "C:\Program Files\7-Zip\7z.exe" a -t7z -mx=9 -mfb=273 -ms=on -v1900m $archiveName ".\ComfyUI-nunchaku\portable_windows\ComfyUI_nunchaku_portable\*"
+
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Archive created successfully"
+
+            # List all created parts
+            $parts = Get-ChildItem -Path "." -Filter "ComfyUI_nunchaku_portable_v${version}_${cuda}.7z.*"
+            Write-Host "`nCreated archive parts:"
+            foreach ($part in $parts) {
+              $sizeMB = $part.Length / 1MB
+              Write-Host "  $($part.Name): $([math]::Round($sizeMB, 2)) MB"
+            }
+
+            $totalSizeMB = ($parts | Measure-Object -Property Length -Sum).Sum / 1MB
+            Write-Host "`nTotal size: $([math]::Round($totalSizeMB, 2)) MB"
+          } else {
+            Write-Host "Error: 7z compression failed"
+            exit 1
+          }
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.release_tag }}
+          name: ComfyUI-nunchaku Portable ${{ steps.vars.outputs.release_tag }}
+          body: |
+            ## ComfyUI-nunchaku Portable Release
+
+            **Configuration:**
+            - Nunchaku version: v${{ steps.vars.outputs.nunchaku_version }}
+            - CUDA version: ${{ steps.vars.outputs.cuda_version }}
+            - Python version: 3.11.11
+            - PyTorch version: 2.9.1
+
+            **Installation:**
+            1. Download **ALL** parts below (e.g., `.7z.001`, `.7z.002`, etc.)
+            2. Place all parts in the same folder
+            3. Extract the **first part** (`.7z.001`) using 7-Zip or WinRAR
+               - 7-Zip will automatically combine all parts during extraction
+            4. Run `run_nvidia_gpu.bat` to start ComfyUI
+
+            **System Requirements:**
+            - Windows 10/11
+            - NVIDIA GPU with CUDA support
+            - Latest NVIDIA drivers
+            - 7-Zip or WinRAR for extraction
+
+            **Note:** This is a pre-built portable package split into multiple parts due to file size. No installation required!
+          files: |
+            ComfyUI_nunchaku_portable_v${{ steps.vars.outputs.nunchaku_version }}_${{ steps.vars.outputs.cuda_version }}.7z.*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: portable-build-log
+          path: |
+            ComfyUI-nunchaku/portable_windows/ComfyUI_nunchaku_portable/VERSION_INFO.txt
+          retention-days: 30
